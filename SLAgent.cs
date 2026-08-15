@@ -137,6 +137,9 @@ teleport_player    传送到另一玩家身边
 teleport_to_room   传送到房间
   { ""target"": ""..."", ""room"": ""<RoomType，如 HczArmory|LczClassDSpawn|EzGateA>"" }
 
+teleport_coords    传送到指定坐标
+  { ""target"": ""..."", ""x"": 0, ""y"": 0, ""z"": 0 }
+
 ━━━ 地图控制 ━━━
 lights_out         关闭全图灯光
   { ""duration_seconds"": <秒> }
@@ -211,6 +214,9 @@ round_end          强制结束回合
 force_start        强制开始回合（等待期间）
   {}
 
+server_info        查询服务器状态（在线人数/回合/核弹）
+  {}
+
 list_players       列出在线玩家
   {}
 
@@ -270,6 +276,7 @@ chat               仅文字回复，不执行任何操作
                 // 传送
                 "teleport_player"  => ToolTeleportToPlayer(p),
                 "teleport_to_room" => ToolTeleportToRoom(p),
+                "teleport_coords"  => ToolTeleportCoords(p),
                 // 地图
                 "lights_out"       => ToolLightsOut(p),
                 "lock_door"        => ToolLockDoor(p),
@@ -294,6 +301,7 @@ chat               仅文字回复，不执行任何操作
                 "round_end"        => ToolRoundEnd(p),
                 "force_start"      => ToolForceStart(),
                 // 查询
+                "server_info"      => ToolServerInfo(),
                 "list_players"     => ToolListPlayers(),
                 "query_player"     => ToolQuery(p),
                 // 纯对话
@@ -403,9 +411,10 @@ chat               仅文字回复，不执行任何操作
         {
             var player = FindPlayer(p["target"]?.ToString());
             if (player == null) return $"找不到玩家：{p["target"]}";
-            float x = p["x"]?.Value<float>() ?? 1f;
-            float y = p["y"]?.Value<float>() ?? 1f;
-            float z = p["z"]?.Value<float>() ?? 1f;
+            // ★ 范围校验：防止 0 或负数导致玩家消失/异常
+            float x = Math.Max(0.01f, Math.Min(100f, p["x"]?.Value<float>() ?? 1f));
+            float y = Math.Max(0.01f, Math.Min(100f, p["y"]?.Value<float>() ?? 1f));
+            float z = Math.Max(0.01f, Math.Min(100f, p["z"]?.Value<float>() ?? 1f));
             player.Scale = new Vector3(x, y, z);
             return $"已设置 {player.Nickname} 体型为 ({x}, {y}, {z})";
         }
@@ -482,7 +491,8 @@ chat               仅文字回复，不执行任何操作
             if (!Enum.TryParse<EffectType>(p["effect"]?.ToString(), true, out var effect))
                 return $"未知效果：{p["effect"]}";
             byte  intensity = p["intensity"]?.Value<byte>() ?? 1;
-            float duration  = p["duration"]?.Value<float>() ?? 10f;
+            // ★ 上限保护：单次效果时长不超过 1 小时
+            float duration  = Math.Max(0f, Math.Min(p["duration"]?.Value<float>() ?? 10f, 3600f));
             foreach (var pl in players)
                 pl.EnableEffect(effect, intensity, duration);
             return $"已给予 {string.Join(", ", players.Select(pl => pl.Nickname))} 效果 {effect}（强度{intensity}，{duration}秒）";
@@ -523,6 +533,17 @@ chat               仅文字回复，不执行任何操作
             if (room == null) return $"找不到房间：{roomStr}";
             foreach (var pl in players) pl.Teleport(room);
             return $"已将 {string.Join(", ", players.Select(pl => pl.Nickname))} 传送到 {room.Name}";
+        }
+
+        private static string ToolTeleportCoords(JObject p)
+        {
+            var players = FindPlayers(p["target"]?.ToString());
+            if (!players.Any()) return $"找不到玩家：{p["target"]}";
+            float x = p["x"]?.Value<float>() ?? 0f;
+            float y = p["y"]?.Value<float>() ?? 0f;
+            float z = p["z"]?.Value<float>() ?? 0f;
+            foreach (var pl in players) pl.Position = new Vector3(x, y, z);
+            return $"已将 {string.Join(", ", players.Select(pl => pl.Nickname))} 传送到 ({x:F1}, {y:F1}, {z:F1})";
         }
 
         // ━━━ 地图控制 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -602,6 +623,13 @@ chat               仅文字回复，不执行任何操作
             string message  = p["message"]?.ToString();
             string subtitle = p["subtitle"]?.ToString() ?? message;
             if (string.IsNullOrWhiteSpace(message)) return "CASSIE 消息为空";
+            // ★ 长度限制：CASSIE 引擎有字数上限，超长会报错或被截断
+            const int MaxCassieLength = 120;
+            if (message.Length > MaxCassieLength)
+            {
+                message  = message.Substring(0, MaxCassieLength);
+                subtitle = subtitle.Length > MaxCassieLength ? subtitle.Substring(0, MaxCassieLength) : subtitle;
+            }
             if (translated)
                 Exiled.API.Features.Cassie.MessageTranslated(message, subtitle);
             else if (silent)
@@ -616,6 +644,8 @@ chat               仅文字回复，不执行任何操作
             string msg      = p["message"]?.ToString();
             int    duration = p["duration_seconds"]?.Value<int>() ?? 5;
             if (string.IsNullOrWhiteSpace(msg)) return "广播内容为空";
+            // ★ 时长限制：防止 ushort 溢出或异常超长广播
+            duration = Math.Max(1, Math.Min(duration, 600));
             Map.Broadcast((ushort)duration, msg);
             return $"已广播（{duration}秒）：{msg}";
         }
@@ -721,6 +751,19 @@ chat               仅文字回复，不执行任何操作
 
         // ━━━ 查询 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+        private static string ToolServerInfo()
+        {
+            var sb = new StringBuilder();
+            int online = Player.List.Count(p => !p.IsNPC);
+            sb.AppendLine($"服务器：{Server.Name}");
+            sb.AppendLine($"在线人数：{online}/{Server.MaxPlayerCount}");
+            sb.AppendLine($"回合状态：{(Round.IsStarted ? "进行中" : "等待开始")}");
+            if (Round.IsStarted)
+                sb.AppendLine($"回合时长：{(int)Round.ElapsedTime.TotalSeconds} 秒");
+            sb.AppendLine($"核弹状态：{(Warhead.IsDetonated ? "已爆炸" : Warhead.IsInProgress ? $"倒计时 {(int)Warhead.RealDetonationTimer} 秒" : "未激活")}");
+            return sb.ToString().TrimEnd();
+        }
+
         private static string ToolListPlayers()
         {
             var list = Player.List.Where(p => !p.IsNPC).ToList();
@@ -774,6 +817,7 @@ chat               仅文字回复，不执行任何操作
         {
             "chat"         => true,
             "list_players" => true,
+            "server_info"  => true,
             "query_player" => true,
             _              => false
         };
@@ -801,7 +845,7 @@ chat               仅文字回复，不执行任何操作
     {
         public override string Name    => "SLAgent";
         public override string Author  => "DNT_OF";
-        public override Version Version => new Version(3, 1, 0);
+        public override Version Version => new Version(3, 2, 0);
 
         public static SLAgent Instance { get; private set; }
 
@@ -810,6 +854,7 @@ chat               仅文字回复，不执行任何操作
 
         private readonly ConcurrentDictionary<string, List<ChatMessage>> conversations = new();
         private readonly ConcurrentDictionary<string, string> playerModels             = new();
+        private readonly ConcurrentDictionary<string, DateTime> _lastActive            = new();
         private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
 
         // ★ 全局并发计数（Interlocked 保证线程安全）
@@ -833,6 +878,7 @@ chat               仅文字回复，不执行任何操作
                 string steam64 = GetSteam64(ev?.Player);
                 conversations.TryRemove(steam64, out _);
                 playerModels.TryRemove(steam64, out _);
+                _lastActive.TryRemove(steam64, out _);
             }
             catch { /* 清理失败不影响其他功能 */ }
         }
@@ -928,6 +974,12 @@ chat               仅文字回复，不执行任何操作
 
         private async Task<string> AskAgentCore(string steam64, string userMessage, Player caller)
         {
+            // ★ 会话过期：30 分钟无活动自动重置上下文，防内存长期占用
+            if (_lastActive.TryGetValue(steam64, out var last) &&
+                (DateTime.UtcNow - last).TotalMinutes > 30)
+                ResetConversation(steam64);
+            _lastActive[steam64] = DateTime.UtcNow;
+
             string modelKey = GetPlayerModel(steam64);
             if (!ModelRegistry.Models.TryGetValue(modelKey, out var model))
                 return $"未知模型：{modelKey}";

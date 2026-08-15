@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 SLAgent v3.1
+# 🤖 SLAgent v3.2
 
 **SCP: Secret Laboratory 服务器智能管理 AI Agent**  
 *用自然语言管理你的 SCP:SL 服务器*
@@ -256,6 +256,15 @@ msbuild SLAgent.csproj /p:Configuration=Release
 ---
 
 ## 📌 版本历史
+
+### v3.2.0
+- 🆕 **新工具 `server_info`**：查询服务器状态（在线人数/回合/核弹），普通白名单玩家也可用
+- 🆕 **新工具 `teleport_coords`**：传送到指定世界坐标
+- ⏱️ **会话过期清理**：30 分钟无活动自动重置对话上下文，防止内存长期占用
+- 🛡️ **广播时长限制**：1~600 秒，防止 ushort 溢出
+- 🔉 **CASSIE 长度限制**：120 字符上限，防超长播报出错
+- 📐 **Scale 范围校验**：0.01~100 倍，防止玩家消失/异常
+- ⚕️ **效果时长上限**：单次效果不超过 1 小时
 
 ### v3.1.0
 - 🔒 **权限分级**：新增 `AdminWhitelist` 管理员名单，只读工具（chat/list/query）对所有白名单玩家开放，管理类工具仅限管理员执行
