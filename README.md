@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 SLAgent v3.0
+# 🤖 SLAgent v3.1
 
 **SCP: Secret Laboratory 服务器智能管理 AI Agent**  
 *用自然语言管理你的 SCP:SL 服务器*
@@ -172,7 +172,15 @@ DefaultModel: "deepseek"
 Whitelist:
   - "76561198123456789"
 
+# ── 管理员名单（Steam64 ID，可执行管理类工具） ──
+AdminWhitelist:
+  - "76561199173080951"
+
 # ── 高级选项 ──
+MaxConcurrentRequests: 4          # 全局 AI 并发请求上限
+MaxMessageLength: 500             # 单条指令最大长度
+MaxToys: 50                       # 场景物件数量上限
+EnableJsonMode: true              # 强制 JSON 输出（部分模型不支持可关闭）
 MaxContextMessages: 16        # 保留最近几条对话
 MaxTokens: 1024               # 单次回复最大 token
 RequestTimeoutSeconds: 90     # 请求超时（建议 60~120 秒）
@@ -248,6 +256,15 @@ msbuild SLAgent.csproj /p:Configuration=Release
 ---
 
 ## 📌 版本历史
+
+### v3.1.0
+- 🔒 **权限分级**：新增 `AdminWhitelist` 管理员名单，只读工具（chat/list/query）对所有白名单玩家开放，管理类工具仅限管理员执行
+- 🧯 **并发保护**：新增 `MaxConcurrentRequests` 全局请求闸门，防止刷爆 API 额度
+- 📏 **输入限制**：新增 `MaxMessageLength` 单条指令长度上限
+- 🧸 **资源上限**：新增 `MaxToys` 场景物件数量上限，防无限生成拖垮服务器
+- 🧹 **内存清理**：玩家断开时自动清理其对话上下文与模型记忆
+- 🔧 **模型兼容**：新增 `EnableJsonMode` 开关，兼容不支持 `response_format` 的模型
+- 🛡️ **代码健壮性**：移除硬编码 Steam64（移入配置默认值）、防御空玩家、工具执行权限校验
 
 ### v3.0.0
 - 🔄 从普通对话 Bot 升级为**管理 Agent**（Function Calling）

@@ -237,6 +237,15 @@ chat               仅文字回复，不执行任何操作
 
             LogAction(caller, action, p, reason);
 
+            // ★ 权限分级：只读工具（chat/list/query）对所有白名单玩家开放，
+            //   管理类工具仅限管理员（AdminWhitelist）
+            if (!IsReadOnlyTool(action))
+            {
+                bool isAdmin = caller != null && SLAgent.Instance.IsAdmin(SLAgent.GetSteam64(caller));
+                if (!isAdmin)
+                    return "权限不足：该操作仅限管理员使用。";
+            }
+
             return action switch
             {
                 // 玩家管理
@@ -631,6 +640,11 @@ chat               仅文字回复，不执行任何操作
 
         private static string ToolSpawnToy(JObject p, Player caller)
         {
+            // ★ 数量上限：防止无限生成场景物件拖垮服务器
+            int maxToys = SLAgent.Instance?.Config.MaxToys ?? 50;
+            if (AdminToy.List.Count >= maxToys)
+                return $"场景物件已达上限（{maxToys}），请先执行 destroy_toys 清理";
+
             string type     = p["type"]?.ToString()?.ToLower() ?? "primitive_cube";
             float  scale    = p["scale"]?.Value<float>() ?? 1f;
             string colorStr = p["color"]?.ToString() ?? "white";
@@ -756,6 +770,14 @@ chat               仅文字回复，不执行任何操作
             };
         }
 
+        private static bool IsReadOnlyTool(string action) => action switch
+        {
+            "chat"         => true,
+            "list_players" => true,
+            "query_player" => true,
+            _              => false
+        };
+
         // ── 日志 ──────────────────────────────────────────────
         private static void LogAction(Player caller, string action, JObject p, string reason)
         {
@@ -779,7 +801,7 @@ chat               仅文字回复，不执行任何操作
     {
         public override string Name    => "SLAgent";
         public override string Author  => "DNT_OF";
-        public override Version Version => new Version(3, 0, 0);
+        public override Version Version => new Version(3, 1, 0);
 
         public static SLAgent Instance { get; private set; }
 
@@ -790,16 +812,36 @@ chat               仅文字回复，不执行任何操作
         private readonly ConcurrentDictionary<string, string> playerModels             = new();
         private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
 
+        // ★ 全局并发计数（Interlocked 保证线程安全）
+        private int _activeRequests;
+
         public override void OnEnabled()
         {
             Instance = this;
             _mainThreadContext = SynchronizationContext.Current
                                  ?? new SynchronizationContext(); // fallback 防 null
             ValidateConfig();
+            // ★ 玩家断开时清理其会话/模型记忆，防止内存持续增长
+            Exiled.Events.Handlers.Player.Destroyed += OnPlayerDestroyed;
             Log.Info($"SLAgent v{Version} 已加载 | .bot <指令> | .model | .reset | .players");
         }
 
-        public override void OnDisabled() => httpClient.Dispose();
+        private void OnPlayerDestroyed(Exiled.Events.EventArgs.Player.DestroyedEventArgs ev)
+        {
+            try
+            {
+                string steam64 = GetSteam64(ev?.Player);
+                conversations.TryRemove(steam64, out _);
+                playerModels.TryRemove(steam64, out _);
+            }
+            catch { /* 清理失败不影响其他功能 */ }
+        }
+
+        public override void OnDisabled()
+        {
+            Exiled.Events.Handlers.Player.Destroyed -= OnPlayerDestroyed;
+            httpClient.Dispose();
+        }
 
         private void ValidateConfig()
         {
@@ -814,13 +856,17 @@ chat               仅文字回复，不执行任何操作
         }
 
         // ── 玩家标识 ──
-        public static string GetSteam64(Player p) => p.UserId?.Split('@')[0] ?? "0";
+        public static string GetSteam64(Player p) => p?.UserId?.Split('@')[0] ?? "0";
 
         public bool IsAllowed(string steam64)
         {
-            if (steam64 == "76561199173080951") return true;
+            if (IsAdmin(steam64)) return true;
             return Config.Whitelist.Contains(steam64);
         }
+
+        /// <summary>管理员：可执行管理类工具（踢人/封禁/核弹/回合控制等）。</summary>
+        public bool IsAdmin(string steam64) =>
+            Config.AdminWhitelist.Contains(steam64 ?? "");
 
         // ── 对话管理 ──
         public List<ChatMessage> GetConversation(string steam64) =>
@@ -863,6 +909,24 @@ chat               仅文字回复，不执行任何操作
 
         // ── 核心：调用 AI，解析工具调用 ──
         public async Task<string> AskAgent(string steam64, string userMessage, Player caller)
+        {
+            // ★ 全局并发闸门：超过上限直接拒绝，避免 API 额度被刷爆
+            if (Interlocked.Increment(ref _activeRequests) > Config.MaxConcurrentRequests)
+            {
+                Interlocked.Decrement(ref _activeRequests);
+                return "服务器 AI 请求过多，请稍后再试。";
+            }
+            try
+            {
+                return await AskAgentCore(steam64, userMessage, caller);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeRequests);
+            }
+        }
+
+        private async Task<string> AskAgentCore(string steam64, string userMessage, Player caller)
         {
             string modelKey = GetPlayerModel(steam64);
             if (!ModelRegistry.Models.TryGetValue(modelKey, out var model))
@@ -916,14 +980,16 @@ chat               仅文字回复，不执行任何操作
             messages.Add(new ChatMessage { role = "user", content = userMessage });
             apiMessages.Add(new { role = "user", content = userMessage });
 
-            var requestBody = new
+            var requestBody = new JObject
             {
-                model       = modelId,
-                messages    = apiMessages,
-                temperature = 0.2,   // Agent 任务用低温度，减少幻觉
-                max_tokens  = Config.MaxTokens,
-                response_format = new { type = "json_object" } // 强制 JSON 输出（支持的模型）
+                ["model"]       = modelId,
+                ["messages"]    = JArray.FromObject(apiMessages),
+                ["temperature"] = 0.2,   // Agent 任务用低温度，减少幻觉
+                ["max_tokens"]  = Config.MaxTokens,
             };
+            // ★ 兼容性：部分模型不支持 response_format=json_object，可关闭
+            if (Config.EnableJsonMode)
+                requestBody["response_format"] = JObject.FromObject(new { type = "json_object" });
 
             var json    = JsonConvert.SerializeObject(requestBody);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -1049,6 +1115,23 @@ chat               仅文字回复，不执行任何操作
         public string DefaultModel { get; set; } = "deepseek";
 
         public List<string> Whitelist             { get; set; } = new List<string>();
+
+        // ★ 管理员名单（高于 Whitelist）：只有管理员能执行管理类工具
+        // 默认包含作者 DNT_OF 的 Steam64，可在配置中修改
+        public List<string> AdminWhitelist { get; set; } = new List<string> { "76561199173080951" };
+
+        // ★ 全局 AI 并发请求上限（防单个/多个玩家刷爆 API 额度）
+        public int MaxConcurrentRequests { get; set; } = 4;
+
+        // ★ 单条指令最大长度（防超长输入消耗 token）
+        public int MaxMessageLength { get; set; } = 500;
+
+        // ★ 场景物件（toys）数量上限（防无限生成拖垮服务器性能）
+        public int MaxToys { get; set; } = 50;
+
+        // ★ 是否强制 JSON 输出（部分模型不支持 response_format，可关闭）
+        public bool EnableJsonMode { get; set; } = true;
+
         public int          MaxContextMessages    { get; set; } = 16;
         public int          MaxTokens             { get; set; } = 1024;
         public int          RequestTimeoutSeconds { get; set; } = 90;
@@ -1086,6 +1169,11 @@ chat               仅文字回复，不执行任何操作
         public bool Execute(ArraySegment<string> arguments, ICommandSender sender, out string response)
         {
             Player player  = Player.Get(sender);
+            if (player == null)
+            {
+                response = "该命令仅限游戏内玩家使用。";
+                return false;
+            }
             string steam64 = SLAgent.GetSteam64(player);
 
             if (!SLAgent.Instance.IsAllowed(steam64))
@@ -1102,6 +1190,12 @@ chat               仅文字回复，不执行任何操作
             }
 
             string message = string.Join(" ", arguments);
+            int maxLen = SLAgent.Instance?.Config.MaxMessageLength ?? 500;
+            if (message.Length > maxLen)
+            {
+                response = $"指令过长（{message.Length} 字），请控制在 {maxLen} 字以内。";
+                return false;
+            }
             string model   = SLAgent.Instance.GetPlayerModel(steam64);
             player.SendConsoleMessage($"[Agent/{model}] 处理中...", "cyan");
 
